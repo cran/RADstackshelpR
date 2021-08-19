@@ -1,0 +1,185 @@
+---
+title: "Reproducible example"
+author: "Devon DeRaad"
+date: "6 August 2021"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Reproducible example}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+### This vignette/article is designed to provide a fully reproducible example of how to use the RADstackshelpR package to optimize [STACKS](https://catchenlab.life.illinois.edu/stacks/) parameters. Each bash code chunk gives a generic example of code you could use to execute the STACKS pipeline. Each R code chunk uses extremely light (20 samples, ~200 SNPs), toy vcf files which are distributed with the package, in order to provide fully reproducible examples for end-users. These chunks should run successfully if you have successfully installed the package.
+
+### Demultiplex
+
+```{bash, eval = FALSE}
+/home/path/to/stacks-2.41/process_radtags -p .  -o . -b plate.1.barcodes.txt -e ndeI -r -c -q
+```
+
+More details on demultiplexing using process_radtags can be found [here](https://catchenlab.life.illinois.edu/stacks/comp/process_radtags.php)
+
+### Iterate over potential values for the 'm' parameter in the 'ustacks' module
+
+Once you have an individual zipped fastq file for each sample, we need to iterate over the relevant values for 'm' within the 'ustacks' module (here using 15 threads at each step to speed up computation). Running the following code in a terminal window will perform five separate iterations of the entire STACKS pipeline, each with a different parameter setting for 'm' (3-7), and save the results as an unfiltered vcf file in a specified directory.
+
+```{bash, eval = FALSE}
+#designate all sample ID's to a single variable called 'files', each sample should be in the directory, and the filename should match this designation except for the extension, e.g., 'sample_2' = 'sample_2.fq.gz'
+files="sample_1
+sample_2
+sample_3
+sample_4
+sample_5"
+# Build loci de novo in each sample for the single-end reads only.
+# -M — Maximum distance (in nucleotides) allowed between stacks (default 2).
+# -m — Minimum depth of coverage required to create a stack (default 3).
+#here, we will vary m from 3-7, and leave all other paramaters default
+for i in {3..7}
+do
+#create a directory to hold this unique iteration:
+mkdir stacks_m$i
+#run ustacks with m equal to the current iteration (3-7) for each sample
+id=1
+for sample in $files
+do
+    /home/path/to/stacks-2.41/ustacks -f ${sample}.fq.gz -o stacks_m$i -i $id -m $i -p 15
+    let "id+=1"
+done
+## Run cstacks to compile stacks between samples. Popmap is a file in working directory called 'pipeline_popmap.txt'
+/home/path/to/stacks-2.41/cstacks -P stacks_m$i -M pipeline_popmap.txt -p 15
+## Run sstacks. Match all samples supplied in the population map against the catalog.
+/home/path/to/stacks-2.41/sstacks -P stacks_m$i -M pipeline_popmap.txt -p 15
+## Run tsv2bam to transpose the data so it is stored by locus, instead of by sample.
+/home/path/to/stacks-2.41/tsv2bam -P stacks_m$i -M pipeline_popmap.txt -t 15
+## Run gstacks: build a paired-end contig from the metapopulation data (if paired-reads provided),
+## align reads per sample, call variant sites in the population, genotypes in each individual.
+/home/path/to/stacks-2.41/gstacks -P stacks_m$i -M pipeline_popmap.txt -t 15
+## Run populations completely unfiltered and output unfiltered vcf, for input to the RADstackshelpR package
+/home/path/to/stacks-2.41/populations -P stacks_m$i -M pipeline_popmap.txt --vcf -t 15
+done
+```
+
+You should now have five directories, named: stacks_m3, stacks_m4, stacks_m5, stacks_m6, & stacks_m7, each of which contains an vcf file with all called SNPs for the given parameter settings (i.e., stacks_m3 = the directory containing output from the iteration where 'm' was set to 3). Now we will use RADstackshelpR to determine which of these parameter settings (m = 3-7) is optimal for this dataset according to the 'R80' cutoff (see [Lost in Parameter Space](https://doi.org/10.1111/2041-210X.12775)). I have now moved each vcf file into a local directory, and named it according to the parameter settings for the given run.
+
+### Use RADstackshelpR to visualize the output of these 5 runs and determine the optimal value for the parameter 'm'.
+
+```{r, dpi=150, fig.width=3.5, fig.height=2.5}
+#load RADstackshelpR package
+library(RADstackshelpR)
+#optimize_m function will generate summary stats on your 5 iterative runs
+#input can be full path to each file, or just the file name if the vcf files are in your working directory
+m.out<-optimize_m(m3 = system.file("extdata", "m3.vcf.gz", package = "RADstackshelpR"),
+                     m4 = system.file("extdata", "m4.vcf.gz", package = "RADstackshelpR"),
+                     m5 = system.file("extdata", "m5.vcf.gz", package = "RADstackshelpR"),
+                     m6 = system.file("extdata", "m6.vcf.gz", package = "RADstackshelpR"),
+                     m7 = system.file("extdata", "m7.vcf.gz", package = "RADstackshelpR"))
+#Assigning the output of this function to the variable 'm.out' should generate a list containing five objects of class 'data.frame' with the following characteristics: 'depth' showing depth per sample for each m value, 'snp' showing the number of non-missing SNPs retained in each sample at each m value, 'loci' showing the number of non-missing loci retained in each sample at each m value, 'snp.R80' showing the total number of SNPs retained at an 80% completeness cutoff, and 'loci.R80' showing the total number of polymorphic loci retained at an 80% completeness cutoff.
+#Use this output list as input for this function, to visualize the effect of varying m on the depth of each sample
+vis_depth(output = m.out)
+#visualize the effect of varying m on the number of SNPs retained
+vis_snps(output = m.out, stacks_param = "m")
+#visualize the effect of varying m on the number of loci retained
+vis_loci(output = m.out, stacks_param = "m")
+#3 is the optimal m value, and will be used next to optimize M
+```
+
+### Iterate over potential values for the 'M' parameter in the 'ustacks' module
+
+Now that we know the optimal value for 'm' is 3, we will repeat the process of iterating over parameter values in STACKS, this time varying the 'M' parameter from 1-8 within the 'ustacks' module. In this example, we again use 15 threads to speed up each step. Execute the following code in a terminal window:
+
+```{bash, eval = FALSE}
+# -M — Maximum distance (in nucleotides) allowed between stacks (default 2).
+# -m — Minimum depth of coverage required to create a stack (default 3).
+#here, vary M from 1-8, and set m to the optimized value based on prior visualizations (here 3)
+for i in {1..8}
+do
+#create a directory to hold this unique iteration:
+mkdir stacks_bigM$i
+#run ustacks with M equal to the current iteration (1-8) for each sample, and m set to the optimized value (here, m=3)
+id=1
+for sample in $files
+do
+    /home/path/to/stacks-2.41/ustacks -f ${sample}.fq.gz -o stacks_bigM$i -i $id -m 3 -M $i -p 15
+    let "id+=1"
+done
+/home/path/to/stacks-2.41/cstacks -P stacks_bigM$i -M pipeline_popmap.txt -p 15
+/home/path/to/stacks-2.41/sstacks -P stacks_bigM$i -M pipeline_popmap.txt -p 15
+/home/path/to/stacks-2.41/tsv2bam -P stacks_bigM$i -M pipeline_popmap.txt -t 15
+/home/path/to/stacks-2.41/gstacks -P stacks_bigM$i -M pipeline_popmap.txt -t 15
+/home/path/to/stacks-2.41/populations -P stacks_bigM$i -M pipeline_popmap.txt --vcf -t 15
+done
+```
+
+You should now have eight directories, named: stacks_bigM1, stacks_bigM2, ... stacks_bigM8,, each of which contains an vcf file with all called SNPs for the given parameter settings. I have again moved each vcf file into a local directory, and named it according to the parameter settings for the given run.
+
+### Use RADstackshelpR to visualize the output of these 8 runs and determine the optimal value for the parameter 'M'.
+
+```{r, dpi =150, fig.width=3.5, fig.height=2.5}
+#optimize_bigM function will generate summary stats on your 8 iterative runs
+M.out<-optimize_bigM(M1 = system.file("extdata", "bigM1.vcf.gz", package = "RADstackshelpR"),
+                     M2 = system.file("extdata", "bigM2.vcf.gz", package = "RADstackshelpR"),
+                     M3 = system.file("extdata", "bigM3.vcf.gz", package = "RADstackshelpR"),
+                     M4 = system.file("extdata", "bigM4.vcf.gz", package = "RADstackshelpR"),
+                     M5 = system.file("extdata", "bigM5.vcf.gz", package = "RADstackshelpR"),
+                     M6 = system.file("extdata", "bigM6.vcf.gz", package = "RADstackshelpR"),
+                     M7 = system.file("extdata", "bigM7.vcf.gz", package = "RADstackshelpR"),
+                     M8 = system.file("extdata", "bigM8.vcf.gz", package = "RADstackshelpR"))
+#Assigning the output of this function to the variable 'M.out' should generate a list containing four objects of class 'data.frame' with the following characteristics: 'snp' showing the number of non-missing SNPs retained in each sample at each m value, 'loci' showing the number of non-missing loci retained in each sample at each m value, 'snp.R80' showing the total number of SNPs retained at an 80% completeness cutoff, and 'loci.R80' showing the total number of polymorphic loci retained at an 80% completeness cutoff.
+#use this function to visualize the effect of varying 'M' on the number of SNPs retained
+vis_snps(output = M.out, stacks_param = "M")
+#visualize the effect of varying 'M' on the number of polymorphic loci retained
+vis_loci(output = M.out, stacks_param = "M")
+#optimal value for this dataset is M = 2
+```
+
+### Iterate over potential values for the 'n' parameter in the 'cstacks' module
+
+For the last optimization iteration, we will vary the 'n' parameter within the 'cstacks' module, using the previously optimized values for 'm' and 'M', by running the following code in a terminal window:
+
+```{bash, eval = FALSE}
+# -n — Number of mismatches allowed between sample loci when build the catalog (default 1).
+#here, vary 'n' across M-1, M, and M+1 (because my optimized 'M' value = 2, I will iterate over 1, 2, and 3 here), with 'm' and 'M' set to the optimized value based on prior visualizations (here 'm' = 3, and 'M'=2).
+for i in {1..3}
+do
+#create a directory to hold this unique iteration:
+mkdir stacks_n$i
+#run ustacks with n equal to the current iteration (1-3) for each sample, m = 3, and M=2
+id=1
+for sample in $files
+do
+    /home/path/to/stacks-2.41/ustacks -f ${sample}.fq.gz -o stacks_n$i -i $id -m 3 -M 2 -p 15
+    let "id+=1"
+done
+/home/path/to/stacks-2.41/cstacks -n $i -P stacks_n$i -M pipeline_popmap.txt -p 15
+/home/path/to/stacks-2.41/sstacks -P stacks_n$i -M pipeline_popmap.txt -p 15
+/home/path/to/stacks-2.41/tsv2bam -P stacks_n$i -M pipeline_popmap.txt -t 15
+/home/path/to/stacks-2.41/gstacks -P stacks_n$i -M pipeline_popmap.txt -t 15
+/home/path/to/stacks-2.41/populations -P stacks_n$i -M pipeline_popmap.txt --vcf -t 15
+done
+```
+
+
+### Use RADstackshelpR to visualize the output of these 3 runs and determine the optimal value for 'n'.
+
+```{r, dpi=150, fig.width=3.5, fig.height=2.5}
+#optimize n
+n.out<-optimize_n(nequalsMminus1 = system.file("extdata", "nequalsmminus1.vcf.gz", package = "RADstackshelpR"),
+                        nequalsM = system.file("extdata", "nequalsm.vcf.gz", package = "RADstackshelpR"),
+                        nequalsMplus1 = system.file("extdata", "nequalsmplus1.vcf.gz", package = "RADstackshelpR"))
+##Assigning the output of this function to the variable 'n.out' should generate a single object of class 'data.frame' showing the number of SNPs and loci retained across filtering levels for each value of n.
+#visualize the effect of varying n on the number of SNPs retained
+vis_snps(output = n.out, stacks_param = "n")
+#visualize the effect of varying n on the number of polymorphic loci retained
+vis_loci(output = n.out, stacks_param = "n")
+```
+
+You now have a de novo-assembled, parameter-optimized, unfiltered SNP dataset for your organism, and a single cohesive figure documenting the filtering process, which you can stick in your paper's supplement or host on your own repository. The next step is to filter this vcf file using the SNPfiltR package, which is specifically designed to pick up where this pipeline leaves off, or with any other variant filtering program of your choice.
+
+
